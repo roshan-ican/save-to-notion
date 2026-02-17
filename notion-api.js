@@ -494,6 +494,12 @@ export async function createNotionPage(accessToken, databaseId, data) {
       if (body.properties.Space) {
         minimalProps.Space = body.properties.Space;
       }
+      if (body.properties.Approach) {
+        minimalProps.Approach = body.properties.Approach;
+      }
+      if (body.properties.Platform) {
+        minimalProps.Platform = body.properties.Platform;
+      }
 
       // Retry with minimal properties
       const retryBody = {
