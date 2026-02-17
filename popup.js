@@ -311,17 +311,7 @@ saveBtn.addEventListener('click', () => {
       showStatus('Saved successfully!', 'success');
       loadStats(); // refresh stats
     } else {
-      // Provide user-friendly error message
-      let errorMsg = response?.error || 'Failed to save.';
-
-      // Check if it's a property-related error
-      if (errorMsg.includes('property') && errorMsg.includes('not') && errorMsg.includes('exist')) {
-        errorMsg = 'Some optional properties (like Approach) don\'t exist in your database. Problem saved without them.';
-        showStatus(errorMsg, 'success'); // Show as success since data was saved
-        loadStats(); // refresh stats
-      } else {
-        showStatus(errorMsg, 'error');
-      }
+      showStatus(response?.error || 'Failed to save.', 'error');
     }
   });
 });

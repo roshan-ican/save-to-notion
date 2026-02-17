@@ -1,5 +1,18 @@
 const NOTION_API_BASE = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
+const DATABASE_SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
+const databaseSchemaCache = new Map();
+const DEFAULT_PROPERTY_NAMES = {
+  name: 'Name',
+  difficulty: 'Difficulty',
+  dateSolved: 'Date Solved',
+  leetcodeUrl: 'LeetCode URL',
+  tags: 'Tags',
+  runtime: 'Runtime',
+  space: 'Space',
+  approach: 'Approach',
+  platform: 'Platform'
+};
 
 // Split text into 2000-char chunks for Notion's rich_text limit
 function chunkText(text, maxLen = 2000) {
@@ -221,9 +234,10 @@ function mapLanguage(lcLang) {
 }
 
 // Build Notion database page properties
-function buildProperties(data) {
+function buildProperties(data, propertyNames = DEFAULT_PROPERTY_NAMES) {
+  const names = { ...DEFAULT_PROPERTY_NAMES, ...propertyNames };
   const props = {
-    'Name': {
+    [names.name]: {
       title: [{
         type: 'text',
         text: {
@@ -231,50 +245,221 @@ function buildProperties(data) {
         }
       }]
     },
-    'Difficulty': {
+    [names.difficulty]: {
       select: { name: data.problem.difficulty }
     },
-    'Date Solved': {
+    [names.dateSolved]: {
       date: { start: new Date().toISOString().split('T')[0] }
     },
-    'LeetCode URL': {
+    [names.leetcodeUrl]: {
       url: data.url
     }
   };
 
   if (data.problem.topicTags?.length > 0) {
-    props['Tags'] = {
+    props[names.tags] = {
       multi_select: data.problem.topicTags.map(tag => ({ name: tag.name }))
     };
   }
 
   if (data.runtime) {
-    props['Runtime'] = {
+    props[names.runtime] = {
       rich_text: [{ type: 'text', text: { content: data.runtime } }]
     };
   }
 
   if (data.space) {
-    props['Space'] = {
+    props[names.space] = {
       rich_text: [{ type: 'text', text: { content: data.space } }]
     };
   }
 
-  // Optional: Approach (only if database has this property)
   if (data.approach) {
-    props['Approach'] = {
+    props[names.approach] = {
       select: { name: data.approach }
     };
   }
 
-  // Optional: Platform (for multi-platform support)
   if (data.platform) {
-    props['Platform'] = {
+    props[names.platform] = {
       select: { name: data.platform }
     };
   }
 
   return props;
+}
+
+function buildCoreProperties(properties, requiredPropertyNames) {
+  const core = {};
+
+  for (const propertyName of requiredPropertyNames) {
+    if (properties[propertyName]) {
+      core[propertyName] = properties[propertyName];
+    }
+  }
+
+  return core;
+}
+
+function findTitlePropertyName(schemaProperties) {
+  if (schemaProperties[DEFAULT_PROPERTY_NAMES.name]?.type === 'title') {
+    return DEFAULT_PROPERTY_NAMES.name;
+  }
+
+  for (const [propertyName, property] of Object.entries(schemaProperties)) {
+    if (property?.type === 'title') {
+      return propertyName;
+    }
+  }
+
+  return null;
+}
+
+function filterPropertiesBySchema(properties, schemaProperties) {
+  const filtered = {};
+
+  for (const [name, value] of Object.entries(properties)) {
+    if (schemaProperties[name]) {
+      filtered[name] = value;
+    }
+  }
+
+  return filtered;
+}
+
+async function getDatabaseSchemaProperties(accessToken, databaseId, options = {}) {
+  const forceRefresh = options.forceRefresh === true;
+  const cached = databaseSchemaCache.get(databaseId);
+  const now = Date.now();
+  if (!forceRefresh && cached && now - cached.timestamp < DATABASE_SCHEMA_CACHE_TTL_MS) {
+    return cached.properties;
+  }
+
+  const response = await fetch(`${NOTION_API_BASE}/databases/${databaseId}`, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Notion-Version': NOTION_VERSION
+    }
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.message || `Notion API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const properties = data.properties || {};
+
+  databaseSchemaCache.set(databaseId, {
+    timestamp: now,
+    properties
+  });
+
+  return properties;
+}
+
+async function addMissingRequiredProperties(accessToken, databaseId, missingPropertyNames) {
+  const propertiesToAdd = {};
+
+  if (missingPropertyNames.includes(DEFAULT_PROPERTY_NAMES.difficulty)) {
+    propertiesToAdd[DEFAULT_PROPERTY_NAMES.difficulty] = {
+      select: {
+        options: [
+          { name: 'Easy', color: 'green' },
+          { name: 'Medium', color: 'yellow' },
+          { name: 'Hard', color: 'red' }
+        ]
+      }
+    };
+  }
+
+  if (missingPropertyNames.includes(DEFAULT_PROPERTY_NAMES.dateSolved)) {
+    propertiesToAdd[DEFAULT_PROPERTY_NAMES.dateSolved] = { date: {} };
+  }
+
+  if (missingPropertyNames.includes(DEFAULT_PROPERTY_NAMES.leetcodeUrl)) {
+    propertiesToAdd[DEFAULT_PROPERTY_NAMES.leetcodeUrl] = { url: {} };
+  }
+
+  if (Object.keys(propertiesToAdd).length === 0) {
+    return;
+  }
+
+  const response = await fetch(`${NOTION_API_BASE}/databases/${databaseId}`, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Notion-Version': NOTION_VERSION,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ properties: propertiesToAdd })
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    const names = Object.keys(propertiesToAdd).join(', ');
+    throw new Error(
+      `Failed to auto-add required properties (${names}). ${errorData.message || `Notion API error: ${response.status}`}`
+    );
+  }
+
+  const data = await response.json().catch(() => ({}));
+  if (data.properties) {
+    databaseSchemaCache.set(databaseId, {
+      timestamp: Date.now(),
+      properties: data.properties
+    });
+  }
+}
+
+async function resolveSchemaForCreate(accessToken, databaseId) {
+  let schemaProperties = await getDatabaseSchemaProperties(accessToken, databaseId);
+  const titlePropertyName = findTitlePropertyName(schemaProperties);
+
+  if (!titlePropertyName) {
+    throw new Error('Selected database has no title property.');
+  }
+
+  const expectedTypes = {
+    [DEFAULT_PROPERTY_NAMES.difficulty]: 'select',
+    [DEFAULT_PROPERTY_NAMES.dateSolved]: 'date',
+    [DEFAULT_PROPERTY_NAMES.leetcodeUrl]: 'url'
+  };
+
+  const missingProperties = [];
+
+  for (const [propertyName, expectedType] of Object.entries(expectedTypes)) {
+    const property = schemaProperties[propertyName];
+    if (!property) {
+      missingProperties.push(propertyName);
+      continue;
+    }
+    if (property.type !== expectedType) {
+      throw new Error(
+        `Selected database property "${propertyName}" must be type "${expectedType}", but found "${property.type}".`
+      );
+    }
+  }
+
+  if (missingProperties.length > 0) {
+    await addMissingRequiredProperties(accessToken, databaseId, missingProperties);
+    schemaProperties = await getDatabaseSchemaProperties(accessToken, databaseId, { forceRefresh: true });
+  }
+
+  const propertyNames = {
+    ...DEFAULT_PROPERTY_NAMES,
+    name: titlePropertyName
+  };
+
+  const requiredPropertyNames = [
+    propertyNames.name,
+    propertyNames.difficulty,
+    propertyNames.dateSolved,
+    propertyNames.leetcodeUrl
+  ];
+
+  return { schemaProperties, propertyNames, requiredPropertyNames };
 }
 
 // Build Notion page body content (children blocks)
@@ -446,10 +631,34 @@ function buildChildren(data) {
 
 // Create a page in the Notion database
 export async function createNotionPage(accessToken, databaseId, data) {
+  let properties = buildProperties(data);
+  let requiredPropertyNames = [
+    DEFAULT_PROPERTY_NAMES.name,
+    DEFAULT_PROPERTY_NAMES.difficulty,
+    DEFAULT_PROPERTY_NAMES.dateSolved,
+    DEFAULT_PROPERTY_NAMES.leetcodeUrl
+  ];
+
+  try {
+    const schema = await resolveSchemaForCreate(accessToken, databaseId);
+    requiredPropertyNames = schema.requiredPropertyNames;
+    properties = buildProperties(data, schema.propertyNames);
+    properties = filterPropertiesBySchema(properties, schema.schemaProperties);
+  } catch (schemaError) {
+    if (
+      schemaError.message?.startsWith('Selected database') ||
+      schemaError.message?.startsWith('Failed to auto-add required properties')
+    ) {
+      throw schemaError;
+    }
+    // If schema lookup fails, continue with built properties and rely on fallback retry.
+    console.warn('Failed to fetch database schema, continuing without schema filtering:', schemaError.message);
+  }
+
   const body = {
     parent: { database_id: databaseId },
     icon: { type: 'emoji', emoji: '\u2705' },
-    properties: buildProperties(data),
+    properties,
     children: buildChildren(data)
   };
 
@@ -476,30 +685,8 @@ export async function createNotionPage(accessToken, databaseId, data) {
     if (isPropertyError) {
       console.warn('Property validation error, retrying with core properties only:', errorData.message);
 
-      // Build minimal properties (only required ones)
-      const minimalProps = {
-        'Name': body.properties.Name,
-        'Difficulty': body.properties.Difficulty,
-        'Date Solved': body.properties['Date Solved'],
-        'LeetCode URL': body.properties['LeetCode URL']
-      };
-
-      // Try to add optional properties that might exist in the database
-      if (body.properties.Tags) {
-        minimalProps.Tags = body.properties.Tags;
-      }
-      if (body.properties.Runtime) {
-        minimalProps.Runtime = body.properties.Runtime;
-      }
-      if (body.properties.Space) {
-        minimalProps.Space = body.properties.Space;
-      }
-      if (body.properties.Approach) {
-        minimalProps.Approach = body.properties.Approach;
-      }
-      if (body.properties.Platform) {
-        minimalProps.Platform = body.properties.Platform;
-      }
+      // Retry with required properties only (never include optional fields).
+      const minimalProps = buildCoreProperties(body.properties, requiredPropertyNames);
 
       // Retry with minimal properties
       const retryBody = {

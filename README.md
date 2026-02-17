@@ -129,10 +129,10 @@ Benefits:
 - Need: Gemini API key configured
 - Check: Columns must be **Text** type (not Rich Text)
 
-### "Approach is not a property"
+### Optional property warnings (e.g. "Approach is not a property")
 
-- This is OK! Extension auto-retries without optional properties
-- To fix: Add "Approach" as Select property in Notion
+- Extension now checks your database schema and skips optional fields that don't exist
+- You can still add "Approach" as a Select property in Notion if you want that column populated
 
 ### Can't extract code
 
